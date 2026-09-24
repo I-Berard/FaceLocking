@@ -60,15 +60,19 @@ def main():
     # --------------------------------------------------
     # Camera
     # --------------------------------------------------
-    cap = cv2.VideoCapture(1)
+    cap = None
+    for cam_idx in [1, 0, 2]:
+        temp_cap = cv2.VideoCapture(cam_idx)
+        if temp_cap.isOpened():
+            cap = temp_cap
+            break
+        temp_cap.release()
 
-    if not cap.isOpened():
+    if cap is None or not cap.isOpened():
         landmarker.close()
-        raise RuntimeError(
-            "Camera not opened. Try camera index 0/1/2."
-        )
+        raise RuntimeError("Camera not opened. Tried camera indices 1, 0, 2.")
 
-    print("Haar + FaceLandmarker 5pt (minimal). Press 'q' to quit.")
+    print("MediaPipe FaceLandmarker 5pt. Press 'q' to quit.")
 
     timestamp_ms = 0
 
@@ -82,27 +86,23 @@ def main():
 
             H, W = frame.shape[:2]
 
-            # --------------------------------------------------
-            # Haar face detection
-            # --------------------------------------------------
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-            faces = face.detectMultiScale(
-                gray,
-                scaleFactor=1.1,
-                minNeighbors=5,
-                minSize=(60, 60),
-            )
-
-            # Draw ALL Haar faces
-            for (x, y, w, h) in faces:
-                cv2.rectangle(
-                    frame,
-                    (x, y),
-                    (x + w, y + h),
-                    (0, 255, 0),
-                    2,
+            # Optional Haar face detection fallback
+            if not face.empty():
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                faces = face.detectMultiScale(
+                    gray,
+                    scaleFactor=1.1,
+                    minNeighbors=5,
+                    minSize=(60, 60),
                 )
+                for (x, y, w, h) in faces:
+                    cv2.rectangle(
+                        frame,
+                        (x, y),
+                        (x + w, y + h),
+                        (0, 255, 0),
+                        1,
+                    )
 
             # --------------------------------------------------
             # MediaPipe

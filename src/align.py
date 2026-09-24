@@ -62,17 +62,23 @@ def main(
 ) -> None:
     """Run the live face alignment demo."""
 
-    # Camera
-    cap = cv2.VideoCapture(cam_index)
+    # Camera: try requested index, then fallbacks
+    cap = None
+    for idx in [cam_index, 0, 1, 2]:
+        temp_cap = cv2.VideoCapture(idx)
+        if temp_cap.isOpened():
+            cap = temp_cap
+            break
+        temp_cap.release()
 
-    if not cap.isOpened():
-        raise RuntimeError(f"Could not open camera {cam_index}")
+    if cap is None or not cap.isOpened():
+        raise RuntimeError(f"Could not open camera {cam_index} or fallbacks 0, 1, 2")
 
-    # Face detector
+    # Face detector (debug=False for speed)
     detector = Haar5ptDetector(
         min_size=(70, 70),
         smooth_alpha=0.80,
-        debug=True,
+        debug=False,
     )
 
     out_w, out_h = map(int, out_size)

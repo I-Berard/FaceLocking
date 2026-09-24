@@ -107,11 +107,10 @@ def _estimate_norm_5pt(
         dst *= scale
 
     # Similarity transform:
-    # rotation + scale + translation.
+    # rotation + scale + translation using standard least squares.
     matrix, _ = cv2.estimateAffinePartial2D(
         kps,
         dst,
-        method=cv2.LMEDS,
     )
 
     # Fallback if estimation fails.
@@ -531,104 +530,59 @@ class Haar5ptDetector:
         """
         Detect a face and return a smoothed 5-point bounding box.
 
-        Haar:
-            Provides the initial face candidate.
-
-        MediaPipe FaceLandmarker:
-            Confirms the face and provides landmarks.
+        MediaPipe FaceLandmarker provides accurate neural face detection
+        and landmark localization. Haar cascade is used only as fallback.
         """
 
         height, width = frame_bgr.shape[:2]
 
-        gray = cv2.cvtColor(
-            frame_bgr,
-            cv2.COLOR_BGR2GRAY,
-        )
-
-        faces = self._haar_faces(gray)
-
-        if faces.shape[0] == 0:
-            return []
-
         # ---------------------------------------------------------------
-        # Pick largest Haar face.
+        # 1. MediaPipe full-frame 5-point detection (Primary)
         # ---------------------------------------------------------------
-
-        areas = faces[:, 2] * faces[:, 3]
-
-        largest_index = int(
-            np.argmax(areas)
-        )
-
-        x, y, w, h = faces[largest_index].tolist()
-
-        # ---------------------------------------------------------------
-        # MediaPipe confirmation + 5-point landmarks.
-        # ---------------------------------------------------------------
-
         kps = self._facemesh_5pt(frame_bgr)
 
+        # ---------------------------------------------------------------
+        # 2. Haar fallback if MediaPipe returned none
+        # ---------------------------------------------------------------
         if kps is None:
-            if self.debug:
-                print(
-                    "[haar_5pt] Haar face found but "
-                    "MediaPipe FaceLandmarker returned none -> reject"
-                )
+            gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+            faces = self._haar_faces(gray)
+            if faces.shape[0] == 0:
+                return []
+            
+            # Pick largest Haar face
+            areas = faces[:, 2] * faces[:, 3]
+            largest_index = int(np.argmax(areas))
+            hx, hy, hw, hh = faces[largest_index].tolist()
 
-            return []
-
-        # ---------------------------------------------------------------
-        # Verify MediaPipe points are reasonably close to Haar box.
-        # ---------------------------------------------------------------
-
-        margin = 0.35
-
-        x1_margin = x - margin * w
-        y1_margin = y - margin * h
-
-        x2_margin = x + (1.0 + margin) * w
-        y2_margin = y + (1.0 + margin) * h
-
-        inside = (
-            (kps[:, 0] >= x1_margin)
-            & (kps[:, 0] <= x2_margin)
-            & (kps[:, 1] >= y1_margin)
-            & (kps[:, 1] <= y2_margin)
-        )
-
-        if inside.mean() < 0.60:
-            if self.debug:
-                print(
-                    "[haar_5pt] MediaPipe points are not "
-                    "consistent with Haar box -> reject"
-                )
-
-            return []
+            # Dummy keypoints estimation from Haar box if MediaPipe missed
+            kps = np.array(
+                [
+                    [hx + 0.3 * hw, hy + 0.35 * hh],  # left eye
+                    [hx + 0.7 * hw, hy + 0.35 * hh],  # right eye
+                    [hx + 0.5 * hw, hy + 0.55 * hh],  # nose tip
+                    [hx + 0.35 * hw, hy + 0.75 * hh],  # left mouth
+                    [hx + 0.65 * hw, hy + 0.75 * hh],  # right mouth
+                ],
+                dtype=np.float32,
+            )
 
         # ---------------------------------------------------------------
         # Keypoint geometry validation.
         # ---------------------------------------------------------------
-
-        min_eye_distance = max(
-            10.0,
-            0.18 * w,
-        )
+        min_eye_distance = 10.0
 
         if not _kps_span_ok(
             kps,
             min_eye_dist=min_eye_distance,
         ):
             if self.debug:
-                print(
-                    "[haar_5pt] 5pt geometry sanity failed -> reject"
-                )
-
+                print("[haar_5pt] 5pt geometry sanity failed -> reject")
             return []
 
         # ---------------------------------------------------------------
         # Build centered bounding box from keypoints.
         # ---------------------------------------------------------------
-
         box = _bbox_from_5pt(
             kps,
             pad_x=0.55,
@@ -645,7 +599,6 @@ class Haar5ptDetector:
         # ---------------------------------------------------------------
         # Smooth bounding box and keypoints.
         # ---------------------------------------------------------------
-
         smoothed_box = _ema(
             self._prev_box,
             box,
@@ -663,7 +616,6 @@ class Haar5ptDetector:
 
         x1, y1, x2, y2 = smoothed_box.tolist()
 
-        # Haar does not provide a probability score.
         score = 1.0
 
         face = FaceKpsBox(

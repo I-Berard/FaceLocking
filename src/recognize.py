@@ -284,7 +284,7 @@ class HaarFaceLandmarker5pt:
         options = mp.tasks.vision.FaceLandmarkerOptions(
             base_options=base_options,
             running_mode=mp.tasks.vision.RunningMode.VIDEO,
-            num_faces=1,
+            num_faces=5,
             min_face_detection_confidence=0.5,
             min_face_presence_confidence=0.5,
             min_tracking_confidence=0.5,
@@ -307,6 +307,9 @@ class HaarFaceLandmarker5pt:
     def _haar_faces(self, gray: np.ndarray) -> np.ndarray:
         """Detect faces with Haar cascade."""
 
+        if not hasattr(self, "face_cascade") or self.face_cascade.empty():
+            return np.zeros((0, 4), dtype=np.int32)
+
         faces = self.face_cascade.detectMultiScale(
             gray,
             scaleFactor=1.1,
@@ -324,32 +327,28 @@ class HaarFaceLandmarker5pt:
     # MediaPipe 5-point landmarks
     # -----------------------------------------------------------------
 
-    def _roi_landmarks_5pt(
+    def _full_frame_landmarks_5pt(
         self,
-        roi_bgr: np.ndarray,
-    ) -> Optional[np.ndarray]:
+        frame_bgr: np.ndarray,
+    ) -> List[np.ndarray]:
         """
-        Run MediaPipe FaceLandmarker on one ROI.
+        Run MediaPipe FaceLandmarker on full frame.
 
-        Returns five points in ROI coordinates.
+        Returns five points in full-frame coordinates for each detected face.
         """
 
-        height, width = roi_bgr.shape[:2]
+        height, width = frame_bgr.shape[:2]
 
-        if height < 20 or width < 20:
-            return None
-
-        roi_rgb = cv2.cvtColor(
-            roi_bgr,
+        frame_rgb = cv2.cvtColor(
+            frame_bgr,
             cv2.COLOR_BGR2RGB,
         )
 
         mp_image = mp.Image(
             image_format=mp.ImageFormat.SRGB,
-            data=roi_rgb,
+            data=frame_rgb,
         )
 
-        # VIDEO mode requires monotonically increasing timestamps.
         self._timestamp_ms += 1
 
         result = self.face_landmarker.detect_for_video(
@@ -358,10 +357,9 @@ class HaarFaceLandmarker5pt:
         )
 
         if not result.face_landmarks:
-            return None
+            return []
 
-        landmarks = result.face_landmarks[0]
-
+        all_kps = []
         indices = [
             self.IDX_LEFT_EYE,
             self.IDX_RIGHT_EYE,
@@ -370,31 +368,29 @@ class HaarFaceLandmarker5pt:
             self.IDX_MOUTH_RIGHT,
         ]
 
-        points = []
+        for landmarks in result.face_landmarks:
+            points = []
+            for index in indices:
+                landmark = landmarks[index]
+                points.append(
+                    [
+                        landmark.x * width,
+                        landmark.y * height,
+                    ]
+                )
 
-        for index in indices:
-            landmark = landmarks[index]
+            kps = np.asarray(points, dtype=np.float32)
 
-            points.append(
-                [
-                    landmark.x * width,
-                    landmark.y * height,
-                ]
-            )
+            # Enforce consistent left/right ordering.
+            if kps[0, 0] > kps[1, 0]:
+                kps[[0, 1]] = kps[[1, 0]]
 
-        kps = np.asarray(
-            points,
-            dtype=np.float32,
-        )
+            if kps[3, 0] > kps[4, 0]:
+                kps[[3, 4]] = kps[[4, 3]]
 
-        # Enforce consistent left/right ordering.
-        if kps[0, 0] > kps[1, 0]:
-            kps[[0, 1]] = kps[[1, 0]]
+            all_kps.append(kps)
 
-        if kps[3, 0] > kps[4, 0]:
-            kps[[3, 4]] = kps[[4, 3]]
-
-        return kps
+        return all_kps
 
     # -----------------------------------------------------------------
     # Public detection
@@ -405,107 +401,87 @@ class HaarFaceLandmarker5pt:
         frame_bgr: np.ndarray,
         max_faces: int = 5,
     ) -> List[FaceDet]:
-        """Detect and return up to max_faces faces."""
+        """Detect and return up to max_faces faces using MediaPipe full frame."""
 
         height, width = frame_bgr.shape[:2]
 
-        gray = cv2.cvtColor(
-            frame_bgr,
-            cv2.COLOR_BGR2GRAY,
-        )
-
-        faces = self._haar_faces(gray)
-
-        if faces.shape[0] == 0:
-            return []
-
-        # Largest faces first.
-        areas = faces[:, 2] * faces[:, 3]
-        order = np.argsort(areas)[::-1]
-
-        faces = faces[order][:max_faces]
+        # 1. Primary: MediaPipe full frame
+        landmarks_list = self._full_frame_landmarks_5pt(frame_bgr)
 
         detections: List[FaceDet] = []
 
-        for x, y, w, h in faces:
-            # Expand ROI for better landmark stability.
-            margin_x = 0.25 * w
-            margin_y = 0.35 * h
+        if landmarks_list:
+            for kps in landmarks_list:
+                if not _kps_span_ok(kps, min_eye_dist=10.0):
+                    continue
 
-            rx1, ry1, rx2, ry2 = _clip_xyxy(
-                x - margin_x,
-                y - margin_y,
-                x + w + margin_x,
-                y + h + margin_y,
-                width,
-                height,
-            )
-
-            roi = frame_bgr[
-                ry1:ry2,
-                rx1:rx2,
-            ]
-
-            kps_roi = self._roi_landmarks_5pt(roi)
-
-            if kps_roi is None:
-                if self.debug:
-                    print(
-                        "[recognize] "
-                        "FaceLandmarker failed for ROI -> skip"
-                    )
-                continue
-
-            # Convert ROI coordinates back to full-frame coordinates.
-            kps = kps_roi.copy()
-
-            kps[:, 0] += float(rx1)
-            kps[:, 1] += float(ry1)
-
-            # Sanity check relative to Haar face size.
-            if not _kps_span_ok(
-                kps,
-                min_eye_dist=max(
-                    10.0,
-                    0.18 * float(w),
-                ),
-            ):
-                if self.debug:
-                    print(
-                        "[recognize] "
-                        "5-point geometry failed -> skip"
-                    )
-                continue
-
-            # Build a better face box from the landmarks.
-            bbox = _bbox_from_5pt(
-                kps,
-                pad_x=0.55,
-                pad_y_top=0.85,
-                pad_y_bot=1.15,
-            )
-
-            x1, y1, x2, y2 = _clip_xyxy(
-                bbox[0],
-                bbox[1],
-                bbox[2],
-                bbox[3],
-                width,
-                height,
-            )
-
-            detections.append(
-                FaceDet(
-                    x1=x1,
-                    y1=y1,
-                    x2=x2,
-                    y2=y2,
-                    score=1.0,
-                    kps=kps.astype(np.float32),
+                bbox = _bbox_from_5pt(
+                    kps,
+                    pad_x=0.55,
+                    pad_y_top=0.85,
+                    pad_y_bot=1.15,
                 )
+
+                x1, y1, x2, y2 = _clip_xyxy(
+                    bbox[0],
+                    bbox[1],
+                    bbox[2],
+                    bbox[3],
+                    width,
+                    height,
+                )
+
+                detections.append(
+                    FaceDet(
+                        x1=x1,
+                        y1=y1,
+                        x2=x2,
+                        y2=y2,
+                        score=1.0,
+                        kps=kps.astype(np.float32),
+                    )
+                )
+
+        # 2. Fallback: Haar cascade if MediaPipe returned no faces
+        if not detections and hasattr(self, "face_cascade") and not self.face_cascade.empty():
+            gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+            faces = self._haar_faces(gray)
+            if faces.shape[0] > 0:
+                areas = faces[:, 2] * faces[:, 3]
+                order = np.argsort(areas)[::-1]
+                faces = faces[order][:max_faces]
+
+                for x, y, w, h in faces:
+                    kps = np.array(
+                        [
+                            [x + 0.3 * w, y + 0.35 * h],
+                            [x + 0.7 * w, y + 0.35 * h],
+                            [x + 0.5 * w, y + 0.55 * h],
+                            [x + 0.35 * w, y + 0.75 * h],
+                            [x + 0.65 * w, y + 0.75 * h],
+                        ],
+                        dtype=np.float32,
+                    )
+                    x1, y1, x2, y2 = _clip_xyxy(x, y, x + w, y + h, width, height)
+                    detections.append(
+                        FaceDet(
+                            x1=x1,
+                            y1=y1,
+                            x2=x2,
+                            y2=y2,
+                            score=0.8,
+                            kps=kps,
+                        )
+                    )
+
+        # Sort largest face first
+        if detections:
+            detections.sort(
+                key=lambda d: (d.x2 - d.x1) * (d.y2 - d.y1),
+                reverse=True,
             )
 
-        return detections
+        return detections[:max_faces]
 
     def close(self) -> None:
         """Release MediaPipe resources."""
@@ -525,7 +501,7 @@ class FaceDBMatcher:
     def __init__(
         self,
         db: Dict[str, np.ndarray],
-        dist_thresh: float = 0.34,
+        dist_thresh: float = 0.81,
     ) -> None:
         self.db = db
         self.dist_thresh = float(dist_thresh)
@@ -559,7 +535,7 @@ class FaceDBMatcher:
         self.db = load_db_npz(path)
         self._rebuild()
 
-    def match(self, emb: np.ndarray) -> MatchResult:
+    def match(self, emb: Any) -> MatchResult:
         """Return the closest identity."""
 
         if self._mat is None or not self._names:
@@ -570,9 +546,12 @@ class FaceDBMatcher:
                 accepted=False,
             )
 
+        if hasattr(emb, "embedding"):
+            emb = emb.embedding
+
         embedding = (
-            emb.reshape(1, -1)
-            .astype(np.float32)
+            np.asarray(emb, dtype=np.float32)
+            .reshape(1, -1)
         )
 
         # Since embeddings are normalized:
@@ -644,15 +623,19 @@ def main() -> None:
 
         matcher = FaceDBMatcher(
             db=db,
-            dist_thresh=0.82,
+            dist_thresh=0.81,
         )
 
-        cap = cv2.VideoCapture(0)
+        cap = None
+        for cam_idx in [1, 0, 2]:
+            temp_cap = cv2.VideoCapture(cam_idx)
+            if temp_cap.isOpened():
+                cap = temp_cap
+                break
+            temp_cap.release()
 
-        if not cap.isOpened():
-            raise RuntimeError(
-                "Camera not available"
-            )
+        if cap is None or not cap.isOpened():
+            raise RuntimeError("Camera not available. Checked indices 1, 0, 2.")
 
         print(
             "Recognize (multi-face)"

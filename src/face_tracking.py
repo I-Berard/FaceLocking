@@ -63,8 +63,8 @@ class LockedFaceTracker:
         detector,
         embedder,
         matcher,
-        verify_every: int = 10,
-        lost_timeout: int = 24,
+        verify_every: int = 15,
+        lost_timeout: int = 30,
         ema_alpha: float = 0.30,
         dead_zone: float = 0.07,
     ):
@@ -88,8 +88,12 @@ class LockedFaceTracker:
         return (face.x1, face.y1, face.x2, face.y2)
 
     def identity(self, frame, face):
+        if hasattr(face, "_cached_match") and face._cached_match is not None:
+            return face._cached_match
         aligned, _ = align_face_5pt(frame, face.kps, out_size=(112, 112))
-        return self.matcher.match(self.embedder.embed(aligned))
+        match = self.matcher.match(self.embedder.embed(aligned))
+        face._cached_match = match
+        return match
 
     def target_is_verified(self, frame, face) -> bool:
         match = self.identity(frame, face)
@@ -108,7 +112,7 @@ class LockedFaceTracker:
                 best, best_similarity = face, match.similarity
         return best
 
-    def associate(self, faces):
+    def associate(self, frame, faces):
         if self.last_box is None or not faces:
             return None
         last_center = center(self.last_box)
@@ -130,13 +134,22 @@ class LockedFaceTracker:
             overlap = iou(self.last_box, box)
             displacement = np.linalg.norm(center(box) - last_center) / last_diag
             score = overlap - 0.35 * displacement
-            ranked.append((score, face))
+            if score > -0.30:
+                ranked.append((score, face))
 
         if not ranked:
             return None
 
-        score, candidate = max(ranked, key=lambda item: item[0])
-        return candidate if score > -0.30 else None
+        score, best_candidate = max(ranked, key=lambda item: item[0])
+
+        # Verify identity at interval frames or when recovering from LOST state
+        should_verify = (self.state == LockState.LOST) or (self.frame_index % self.verify_every == 0)
+        if should_verify:
+            match = self.identity(frame, best_candidate)
+            if not (match.accepted and match.name == self.target_name):
+                return None
+
+        return best_candidate
 
     def update(self, frame):
         self.frame_index += 1
@@ -145,7 +158,7 @@ class LockedFaceTracker:
         if self.state == LockState.SEARCHING:
             candidate = self.acquire(frame, faces)
         else:
-            candidate = self.associate(faces)
+            candidate = self.associate(frame, faces)
 
         if (
             candidate is not None

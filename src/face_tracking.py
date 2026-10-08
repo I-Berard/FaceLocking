@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
 from typing import Optional, Tuple
+import paho.mqtt.client as mqtt
 
 import cv2
 import numpy as np
@@ -23,6 +24,7 @@ from .face_signals import FaceSignalExtractor
 from .haar_5pt import Haar5ptDetector
 from .recognize import FaceDBMatcher, HaarFaceLandmarker5pt, load_db_npz
 
+client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
 
 class LockState(Enum):
     SEARCHING = auto()
@@ -243,6 +245,8 @@ def main():
     tracker = LockedFaceTracker(args.target, detector, embedder, matcher)
     signals = FaceSignalExtractor()
 
+    client.connect("localhost", 1883, 60)
+
     cap = None
     for cam_idx in [args.camera, 1, 0, 2]:
         temp_cap = cv2.VideoCapture(cam_idx)
@@ -305,6 +309,8 @@ def main():
                         (255, 170, 0),
                         0.60,
                     )
+                    client.publish("position", position.error_x)
+                
             else:
                 signals.reset()
 
@@ -325,6 +331,7 @@ def main():
         cap.release()
         signals.close()
         cv2.destroyAllWindows()
+        client.disconnect()
 
 
 if __name__ == "__main__":

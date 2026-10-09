@@ -309,7 +309,7 @@ def main():
                         (255, 170, 0),
                         0.60,
                     )
-                    client.publish("position", position.error_x)
+                    client.publish("position", position.error_y)
                 
             else:
                 signals.reset()

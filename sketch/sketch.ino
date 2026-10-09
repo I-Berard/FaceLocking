@@ -16,7 +16,7 @@ const char* WIFI_PASSWORD = "Meeting@2024";
 // IMPORTANT:
 // This must be the IP address of the computer running
 // your Mosquitto MQTT broker.
-const char* MQTT_BROKER = "10.12.74.142";
+const char* MQTT_BROKER = "10.12.72.114";
 
 const int MQTT_PORT = 1883;
 
@@ -129,7 +129,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length)
   // CONVERT -1...+1 TO MOTOR POSITION
   // ===================================================
 
-  long targetPosition = -value * MAX_POSITION;
+  long targetPosition = value * MAX_POSITION;
 
   Serial.print("Target motor position: ");
   Serial.println(targetPosition);

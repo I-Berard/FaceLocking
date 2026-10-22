@@ -13,7 +13,6 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
 from typing import Optional, Tuple
-import paho.mqtt.client as mqtt
 
 import cv2
 import numpy as np
@@ -24,7 +23,6 @@ from .face_signals import FaceSignalExtractor
 from .haar_5pt import Haar5ptDetector
 from .recognize import FaceDBMatcher, HaarFaceLandmarker5pt, load_db_npz
 
-client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
 
 class LockState(Enum):
     SEARCHING = auto()
@@ -229,6 +227,9 @@ def main():
     parser.add_argument("--target", required=True, help="enrolled identity to lock")
     parser.add_argument("--camera", type=int, default=1)
     parser.add_argument("--threshold", type=float, default=0.81)
+    parser.add_argument("--mqtt", action="store_true", help="enable MQTT publishing")
+    parser.add_argument("--mqtt-host", type=str, default="localhost")
+    parser.add_argument("--mqtt-port", type=int, default=1883)
     args = parser.parse_args()
 
     detector = HaarFaceLandmarker5pt(min_size=(70, 70), debug=False)
@@ -245,7 +246,17 @@ def main():
     tracker = LockedFaceTracker(args.target, detector, embedder, matcher)
     signals = FaceSignalExtractor()
 
-    client.connect("localhost", 1883, 60)
+    mqtt_client = None
+    if args.mqtt:
+        try:
+            import paho.mqtt.client as mqtt
+            mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+            mqtt_client.connect(args.mqtt_host, args.mqtt_port, 60)
+            print(f"[face_tracking] MQTT connected to {args.mqtt_host}:{args.mqtt_port}")
+        except Exception as e:
+            print(f"[face_tracking] MQTT connection failed: {e}")
+            mqtt_client = None
+
 
     cap = None
     for cam_idx in [args.camera, 1, 0, 2]:
@@ -309,7 +320,8 @@ def main():
                         (255, 170, 0),
                         0.60,
                     )
-                    client.publish("position", position.error_y)
+                    if mqtt_client is not None:
+                        mqtt_client.publish("position", str(position.error_y))
                 
             else:
                 signals.reset()
@@ -331,7 +343,8 @@ def main():
         cap.release()
         signals.close()
         cv2.destroyAllWindows()
-        client.disconnect()
+        if mqtt_client is not None:
+            mqtt_client.disconnect()
 
 
 if __name__ == "__main__":
